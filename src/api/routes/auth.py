@@ -1,79 +1,83 @@
-import secrets
-from typing import Dict
+# src/api/routes/auth.py
 
-from fastapi import APIRouter, HTTPException, status, Header
-from pydantic import BaseModel
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from src.database.db import get_user_by_username
+from src.core.security import (
+    verify_password,
+    create_access_token,
+    decode_access_token,
+)
+from src.schemas.auth import LoginPayload, Token
+from src.schemas.user import UserRead
 from src.utils.logger import get_logger
 
+
 logger = get_logger(__name__)
-router = APIRouter()
+router = APIRouter(prefix="/auth", tags=["auth"])
 
-# token -> username (apenas em memória, suficiente para dev)
-active_tokens: Dict[str, str] = {}
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+# esquema padrão de Bearer para o FastAPI gerar o Authorize
+bearer_scheme = HTTPBearer(auto_error=True)
 
 
-class LoginResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    username: str
+@router.post("/login", response_model=Token)
+def login(payload: LoginPayload):
+    """
+    Faz login com username/senha e devolve um JWT.
+    """
+    row = get_user_by_username(payload.username)
 
-
-@router.post("/auth/login", response_model=LoginResponse)
-def login(payload: LoginRequest):
-    user = get_user_by_username(payload.username)
-
-    if not user:
-        logger.warning(
-            f"Tentativa de login falhou: usuário {payload.username} não encontrado"
-        )
+    if not row or not verify_password(payload.password, row["password"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciais inválidas",
         )
 
-    # Aqui a senha está em texto puro no banco (para dev)
-    if user["password"] != payload.password:
-        logger.warning(
-            f"Tentativa de login falhou: senha inválida para {payload.username}"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Credenciais inválidas",
-        )
+    user = UserRead(id=row["id"], username=row["username"])
 
-    token = secrets.token_hex(32)
-    active_tokens[token] = payload.username
+    access_token = create_access_token(
+        {
+            "sub": user.username,
+            "user_id": user.id,
+            "iat": datetime.utcnow().timestamp(),
+        }
+    )
 
-    logger.info(f"Login bem-sucedido para usuário {payload.username}")
+    logger.info(f"Login bem-sucedido para usuário {user.username}")
 
-    return LoginResponse(access_token=token, username=payload.username)
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": user.username,
+    }
 
 
-def get_current_user(authorization: str = Header(None)):
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> UserRead:
     """
-    Dependency para proteger endpoints.
-    Espera header: Authorization: Bearer <token>
+    Extrai o usuário atual a partir do token Bearer.
     """
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token não informado",
-        )
+    # se não vier header Authorization, o HTTPBearer já levanta "Not authenticated"
+    token = credentials.credentials
 
-    token = authorization.split(" ", 1)[1].strip()
-    username = active_tokens.get(token)
-
-    if not username:
+    try:
+        payload = decode_access_token(token)
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token inválido ou expirado",
         )
 
-    return username
+    username = payload.get("sub")
+    user_id = payload.get("user_id")
+
+    if username is None or user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido ou expirado",
+        )
+
+    return UserRead(id=user_id, username=username)

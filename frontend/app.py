@@ -1,8 +1,9 @@
+# frontend/app.py
 import json
-import requests
 import streamlit as st
 import pandas as pd
 import altair as alt
+from api_client import APIClient
 
 # ----------------------------
 # ESTADO GLOBAL (SESSION STATE)
@@ -13,7 +14,22 @@ if "analysis_data" not in st.session_state:
 if "auth_token" not in st.session_state:
     st.session_state["auth_token"] = None
 
-API_URL = "http://127.0.0.1:8000/api/content/strategy"
+if "current_user" not in st.session_state:
+    st.session_state["current_user"] = None
+
+if "user" not in st.session_state:
+    st.session_state["user"] = None
+
+API_BASE_URL = "http://127.0.0.1:8000/api"
+
+if "api_client" not in st.session_state:
+    st.session_state["api_client"] = APIClient(API_BASE_URL)
+
+api_client: APIClient = st.session_state["api_client"]
+
+# Garante que o client conhece o token salvo na sessão
+if st.session_state["auth_token"]:
+    api_client.token = st.session_state["auth_token"]
 
 # ----------------------------
 # CONFIGURAÇÃO GERAL DA PÁGINA
@@ -25,34 +41,100 @@ st.set_page_config(
 )
 
 # ----------------------------
-# LOGIN
+# LOGIN / REGISTRO
 # ----------------------------
-st.title("🔐 Content Strategy Engine - Login")
-
 if st.session_state["auth_token"] is None:
-    with st.form("login_form"):
-        username = st.text_input("Usuário", value="admin")
-        password = st.text_input("Senha", type="password")
-        submitted = st.form_submit_button("Entrar")
+    st.title("🔐 Content Strategy Engine - Acesso")
 
-    if submitted:
-        try:
-            resp = requests.post(
-                "http://127.0.0.1:8000/api/auth/login",
-                json={"username": username, "password": password},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                data_login = resp.json()
+    auth_mode = st.radio(
+        "Como deseja acessar?",
+        ["Já tenho conta", "Quero me cadastrar"],
+        horizontal=True,
+    )
+
+    if auth_mode == "Já tenho conta":
+        with st.form("login_form"):
+            username = st.text_input("Usuário", value="admin")
+            password = st.text_input("Senha", type="password")
+            submitted = st.form_submit_button("Entrar")
+
+        if submitted:
+            try:
+                data_login = api_client.login(username, password)
                 st.session_state["auth_token"] = data_login["access_token"]
-                st.success(f"Bem-vindo, {data_login['username']}!")
-                st.rerun()  # após isso, o script reinicia e já entra logado
-            else:
-                st.error("Usuário ou senha inválidos.")
-        except Exception as e:
-            st.error(f"Erro ao tentar autenticar: {e}")
+                st.session_state["current_user"] = {
+                    "username": data_login.get("username", username)
+                }
+                st.success(f"Bem-vindo, {data_login.get('username', username)}!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Falha no login: {e}")
+                st.stop()
 
+    else:  # "Quero me cadastrar"
+        with st.form("register_form"):
+            new_username = st.text_input("Novo usuário")
+            new_password = st.text_input("Senha", type="password")
+            new_password2 = st.text_input("Confirme a senha", type="password")
+            submitted_reg = st.form_submit_button("Criar conta")
+
+        if submitted_reg:
+            if not new_username or not new_password:
+                st.error("Usuário e senha são obrigatórios.")
+                st.stop()
+            if new_password != new_password2:
+                st.error("As senhas não coincidem.")
+                st.stop()
+
+            try:
+                # 1) Cria usuário no backend
+                api_client.register(new_username, new_password)
+                st.success("Usuário criado com sucesso! Fazendo login automático...")
+
+                # 2) Faz login automático
+                data_login = api_client.login(new_username, new_password)
+                st.session_state["auth_token"] = data_login["access_token"]
+                st.session_state["user"] = {"username": data_login["username"]}
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao registrar usuário: {e}")
+                st.stop()
+
+    # Se ainda não autenticou, não deixa continuar
     st.stop()
+
+
+# ----------------------------
+# HEADER DE USUÁRIO (TOP BAR)
+# ----------------------------
+user_col_left, user_col_right = st.columns([3, 1])
+
+with user_col_left:
+    user = st.session_state.get("current_user")
+    if user:
+        st.markdown(
+            f"**👋 Olá, `{user['username']}`!** &nbsp;&nbsp;|&nbsp;&nbsp; StratifyAI – Painel de Estratégia",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("**👋 Olá!**")
+
+with user_col_right:
+    logout = st.button("Sair", help="Encerrar sessão atual")
+    if logout:
+        st.session_state["auth_token"] = None
+        st.session_state["current_user"] = None
+        st.session_state["analysis_data"] = None
+        api_client.token = None
+        st.rerun()
+
+
+# Se chegou aqui, está logado
+current_user = st.session_state.get("user")
+st.title("📊 Content Strategy Engine - Dashboard")
+
+if current_user:
+    st.caption(f"Logado como **{current_user['username']}**")
 
 # ----------------------------
 # HEADER PREMIUM (HERO)
@@ -152,7 +234,27 @@ with col3:
 with st.sidebar:
     st.header("⚙️ Configurações")
 
-    api_url = st.text_input("API URL", API_URL)
+    api_base_url_input = st.text_input("API URL", API_BASE_URL)
+
+    # Se quiser permitir mudar o backend:
+    if api_base_url_input.rstrip("/") != api_client.base_url:
+        api_client.base_url = api_base_url_input.rstrip("/")
+
+    st.markdown("---")
+    st.subheader("👤 Conta")
+
+    current_user = st.session_state.get("user")
+    if current_user:
+        st.write(f"Usuário: **{current_user['username']}**")
+
+    if st.button("Sair da conta"):
+        st.session_state["auth_token"] = None
+        st.session_state["user"] = None
+        api_client.token = None
+        st.rerun()
+
+    st.markdown("---")
+    st.subheader("🎯 Parâmetros da análise")
 
     topic = st.text_input("Tema do conteúdo", "marketing digital")
 
@@ -249,28 +351,31 @@ with col_right:
         help="Clique para gerar a estratégia completa",
     )
 
+
 # Se clicou no botão, chama a API e salva o resultado no session_state
 if generate:
-    payload = {
-        "topic": topic,
-        "platform": platform,
-        "mode": mode,
-        "users": users_data,
-    }
-
     with st.spinner("Gerando estratégia..."):
         try:
-            headers = {"Authorization": f"Bearer {st.session_state['auth_token']}"}
-            resp = requests.post(api_url, json=payload, headers=headers, timeout=15)
+            # garante que o client está com o token
+            api_client.token = st.session_state["auth_token"]
+
+            data = api_client.generate_strategy(
+                topic=topic,
+                platform=platform,
+                mode=mode,
+                users=users_data,
+            )
+            st.session_state["analysis_data"] = data
+            st.success("Estratégia gerada com sucesso ✅")
+        except PermissionError as e:
+            st.error("Sessão expirada ou não autenticada. Faça login novamente.")
+            # limpa token e volta para tela de login
+            st.session_state["auth_token"] = None
+            api_client.token = None
+            st.rerun()
         except Exception as e:
-            st.error(f"Erro ao chamar a API: {e}")
+            st.error(f"Erro ao gerar estratégia: {e}")
             st.stop()
-
-        if resp.status_code != 200:
-            st.error(f"Erro da API ({resp.status_code}): {resp.text}")
-            st.stop()
-
-        st.session_state["analysis_data"] = resp.json()
 
 # ----------------------------
 # RENDERIZAÇÃO DOS RESULTADOS
@@ -279,8 +384,6 @@ if generate:
 data = st.session_state["analysis_data"]
 
 if data is not None:
-    st.success("Estratégia gerada com sucesso ✅")
-
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("### 📊 Resultados da Análise")
 
@@ -309,48 +412,50 @@ if data is not None:
     # ----------------------------
     # ABA 0 — HISTÓRICO
     # ----------------------------
+
     with tab_hist:
         st.markdown("### 🗂 Histórico de análises")
 
         try:
-            headers = {"Authorization": f"Bearer {st.session_state['auth_token']}"}
-            history_resp = requests.get(
-                API_URL.replace("strategy", "history"),
-                headers=headers,
-                timeout=10,
-            )
-            history = history_resp.json().get("history", [])
+            api_client.token = st.session_state["auth_token"]
+            history_data = api_client.get_history(limit=50)
+            history = history_data.get("history", [])
+        except PermissionError:
+            st.error("Sessão expirada ao buscar histórico. Faça login novamente.")
+            st.session_state["auth_token"] = None
+            api_client.token = None
+            st.rerun()
         except Exception as e:
             st.error(f"Erro ao carregar histórico: {e}")
             history = []
 
         if history:
             df_hist = pd.DataFrame(history)
-            st.dataframe(df_hist, use_container_width=True)
+            st.dataframe(df_hist, width="stretch")
 
             selected = st.selectbox("Abrir análise ID:", [h["id"] for h in history])
 
             if st.button("📂 Carregar análise selecionada"):
                 try:
-                    headers = {
-                        "Authorization": f"Bearer {st.session_state['auth_token']}"
-                    }
-                    entry_resp = requests.get(
-                        API_URL.replace("strategy", f"history/{selected}"),
-                        headers=headers,
-                        timeout=10,
-                    )
-                    entry_json = entry_resp.json()
-                    result = entry_json.get("result")
+                    api_client.token = st.session_state["auth_token"]
+                    entry_resp = api_client.get_history_entry(selected)
+                    result = entry_resp.get("result")
                     if result:
                         st.session_state["analysis_data"] = result
                         st.success(
-                            f"Análise {selected} carregada com sucesso! Role para cima para ver as abas atualizadas."
+                            f"Análise {selected} carregada com sucesso! "
+                            "Role para cima para ver as abas atualizadas."
                         )
                     else:
                         st.error("Não foi possível carregar os dados dessa análise.")
+                except PermissionError:
+                    st.error("Sessão expirada. Faça login novamente.")
+                    st.session_state["auth_token"] = None
+                    api_client.token = None
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao carregar análise: {e}")
+
         else:
             st.info("Nenhuma análise encontrada no histórico.")
 
@@ -400,7 +505,7 @@ if data is not None:
                 )
                 .properties(height=300)
             )
-            st.altair_chart(chart_gender, use_container_width=True)
+            st.altair_chart(chart_gender, width="stretch")
         else:
             st.info("Sem dados suficientes de gênero para gerar gráfico.")
 
@@ -422,7 +527,7 @@ if data is not None:
                 )
                 .properties(height=300)
             )
-            st.altair_chart(chart_age, use_container_width=True)
+            st.altair_chart(chart_age, width="stretch")
         else:
             st.info("Sem dados suficientes de faixa etária para gerar gráfico.")
 
@@ -444,7 +549,7 @@ if data is not None:
                 )
                 .properties(height=300)
             )
-            st.altair_chart(chart_region, use_container_width=True)
+            st.altair_chart(chart_region, width="stretch")
         else:
             st.info("Sem dados suficientes de região para gerar gráfico.")
 
@@ -535,7 +640,7 @@ if data is not None:
                 .reset_index()
             )
 
-            st.dataframe(grouped, use_container_width=True)
+            st.dataframe(grouped, width="stretch")
 
             # Exportar calendário em CSV
             csv_calendar = df_calendar.to_csv(index=False).encode("utf-8")

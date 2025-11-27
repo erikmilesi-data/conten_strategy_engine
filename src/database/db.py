@@ -1,7 +1,9 @@
+# src/database/db.py
 import sqlite3
 from pathlib import Path
 import json
 from datetime import datetime
+from src.core.security import get_password_hash
 
 DB_PATH = Path(__file__).resolve().parent / "history.db"
 
@@ -54,13 +56,11 @@ def init_db():
     cursor.execute("SELECT COUNT(*) AS total FROM users")
     row = cursor.fetchone()
     if row["total"] == 0:
+        hashed_admin = get_password_hash("admin123")
         cursor.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
-            ("admin", "admin123"),
+            ("admin", hashed_admin),
         )
-
-    conn.commit()
-    conn.close()
 
 
 # ------------------------------------------------------------
@@ -161,3 +161,26 @@ def get_user_by_username(username: str):
     row = cursor.fetchone()
     conn.close()
     return row
+
+
+# ------------------------------------------------------------
+#   CRIAR USUÁRIO
+# ------------------------------------------------------------
+def create_user(username: str, hashed_password: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO users (username, password)
+        VALUES (?, ?)
+        """,
+        (username, hashed_password),
+    )
+
+    conn.commit()
+    user_id = cursor.lastrowid
+    conn.close()
+
+    # Mantemos um dict semelhante ao Row
+    return {"id": user_id, "username": username, "password": hashed_password}
